@@ -3,6 +3,7 @@
 ## How to run
 
 ```bash
+cd backend
 pip install fastapi_cli
 python3 -m venv .venv
 source .venv/bin/activate

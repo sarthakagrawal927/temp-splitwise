@@ -1,13 +1,18 @@
-from fastapi import FastAPI, HTTPException
+from os import getenv
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from models import User, Group, GroupMember, Expense, ExpenseSplit, DatabaseSchemaBase
 from contextlib import asynccontextmanager
+from enum import Enum
 
 # Database Configuration
-DATABASE_URL = "postgresql+asyncpg://postgres:1234567890@localhost:5432/splitwise"
+DATABASE_URL = getenv(
+    "DATABASE_URL", "postgresql+asyncpg://postgres:1234567890@localhost:5432/splitwise"
+)
 
 engine = create_async_engine(DATABASE_URL, echo=True)
 SessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
@@ -23,24 +28,46 @@ class GroupCreate(BaseModel):
     user_ids: list[int]
 
 
+class ExpenseObject(BaseModel):
+    user_id: int
+    percentage: float
+
+
+class SplitType(str, Enum):
+    equal = "equal"
+    percentage = "percentage"
+
+
 class ExpenseCreate(BaseModel):
     group_id: int
     amount: float
     description: str
-    split_type: str  # "equal" or "percentage"
-    splits: list[dict] | None = None  # For "percentage", provide user_id and percentage
+
+    split_type: SplitType
+    splits: list[ExpenseObject] | None = (
+        None  # For "percentage", provide user_id and percentage
+    )
     paid_by: int
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):  # Load the ML model
+async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(DatabaseSchemaBase.metadata.create_all)
     yield
 
 
-# FastAPI App
 app = FastAPI(lifespan=lifespan)
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    print(f"Exception: {exc}")
+
+    return JSONResponse(
+        status_code=500,
+        content={"message": f"An unexpected error occurred: {str(exc)}"},
+    )
 
 
 @app.get("/")
@@ -73,6 +100,30 @@ async def create_group(group: GroupCreate):
         return {"id": new_group.id, "name": new_group.name}
 
 
+@app.get("/groups/{group_id}/members/")
+async def get_group_members(group_id: int):
+    async with SessionLocal() as session:
+        group_members = await session.execute(
+            text(
+                "SELECT u.id, u.name FROM users u "
+                "JOIN group_members gm ON u.id = gm.user_id "
+                "WHERE gm.group_id =:group_id"
+            ),
+            {"group_id": group_id},
+        )
+        members = group_members.fetchall()
+        return [{"id": member.id, "name": member.name} for member in members]
+
+
+@app.get("/groups/add_member/")
+async def add_member(group_id: int, user_id: int):
+    async with SessionLocal() as session:
+        new_member = GroupMember(group_id=group_id, user_id=user_id)
+        session.add(new_member)
+        await session.commit()
+        return {"group_id": group_id, "user_id": user_id}
+
+
 @app.post("/expenses/")
 async def add_expense(expense: ExpenseCreate):
     async with SessionLocal() as session:
@@ -85,7 +136,7 @@ async def add_expense(expense: ExpenseCreate):
         await session.commit()
         await session.refresh(new_expense)
 
-        if expense.split_type == "equal":
+        if expense.split_type == SplitType.equal:
             group_members = await session.execute(
                 text(
                     f"SELECT user_id FROM group_members WHERE group_id = {expense.group_id}"
@@ -102,18 +153,20 @@ async def add_expense(expense: ExpenseCreate):
                 )
                 for member in members
             ]
-        elif expense.split_type == "percentage":
+        elif expense.split_type == SplitType.percentage:
+            if sum([split.percentage for split in expense.splits]) != 100:
+                raise HTTPException(
+                    status_code=400, detail="Sum of percentages should be 100"
+                )
             splits = [
                 ExpenseSplit(
                     expense_id=new_expense.id,
-                    user_id=split["user_id"],
-                    amount=-expense.amount * split["percentage"] / 100,
+                    user_id=split.user_id,
+                    amount=-expense.amount * split.percentage / 100,
                     group_id=expense.group_id,
                 )
                 for split in expense.splits
             ]
-        else:
-            raise HTTPException(status_code=400, detail="Invalid split type")
 
         splits.append(
             ExpenseSplit(
@@ -141,7 +194,6 @@ async def get_balances(group_id: int):
             {"group_id": group_id},
         )
         balances = group_expenses.fetchall()
-        print(balances, group_id)
         return [
             {"user_id": balance.user_id, "balance": balance.balance}
             for balance in balances
