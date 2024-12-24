@@ -1,9 +1,8 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, relationship
+from sqlalchemy.orm import sessionmaker
 from models import User, Group, GroupMember, Expense, ExpenseSplit, DatabaseSchemaBase
 from contextlib import asynccontextmanager
 
@@ -30,6 +29,7 @@ class ExpenseCreate(BaseModel):
     description: str
     split_type: str  # "equal" or "percentage"
     splits: list[dict] | None = None  # For "percentage", provide user_id and percentage
+    paid_by: int
 
 
 @asynccontextmanager
@@ -37,7 +37,6 @@ async def lifespan(app: FastAPI):  # Load the ML model
     async with engine.begin() as conn:
         await conn.run_sync(DatabaseSchemaBase.metadata.create_all)
     yield
-    # Clean up the ML models and release the resources
 
 
 # FastAPI App
@@ -93,7 +92,7 @@ async def add_expense(expense: ExpenseCreate):
                 ExpenseSplit(
                     expense_id=new_expense.id,
                     user_id=member.user_id,
-                    amount=split_amount,
+                    amount=-split_amount,
                     group_id=expense.group_id,
                 )
                 for member in members
@@ -103,13 +102,22 @@ async def add_expense(expense: ExpenseCreate):
                 ExpenseSplit(
                     expense_id=new_expense.id,
                     user_id=split["user_id"],
-                    amount=expense.amount * split["percentage"] / 100,
+                    amount=-expense.amount * split["percentage"] / 100,
                     group_id=expense.group_id,
                 )
                 for split in expense.splits
             ]
         else:
             raise HTTPException(status_code=400, detail="Invalid split type")
+
+        splits.append(
+            ExpenseSplit(
+                expense_id=new_expense.id,
+                user_id=expense.paid_by,
+                amount=expense.amount,
+                group_id=expense.group_id,
+            )
+        )
 
         session.add_all(splits)
         await session.commit()
