@@ -1,52 +1,17 @@
 from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
-from sqlalchemy import Column, Integer, String, ForeignKey, Float
+from models import User, Group, GroupMember, Expense, ExpenseSplit, DatabaseSchemaBase
+from contextlib import asynccontextmanager
 
 # Database Configuration
 DATABASE_URL = "postgresql+asyncpg://postgres:1234567890@localhost:5432/splitwise"
 
 engine = create_async_engine(DATABASE_URL, echo=True)
 SessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-Base = declarative_base()
-
-
-# Models
-class User(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False)
-
-
-class Group(Base):
-    __tablename__ = "groups"
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False)
-
-
-class GroupMember(Base):
-    __tablename__ = "group_members"
-    id = Column(Integer, primary_key=True, index=True)
-    group_id = Column(Integer, ForeignKey("groups.id"), nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-
-
-class Expense(Base):
-    __tablename__ = "expenses"
-    id = Column(Integer, primary_key=True, index=True)
-    group_id = Column(Integer, ForeignKey("groups.id"), nullable=False)
-    amount = Column(Float, nullable=False)
-    description = Column(String, nullable=False)
-
-
-class ExpenseSplit(Base):
-    __tablename__ = "expense_splits"
-    id = Column(Integer, primary_key=True, index=True)
-    expense_id = Column(Integer, ForeignKey("expenses.id"), nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    amount = Column(Float, nullable=False)
 
 
 # Schemas
@@ -64,17 +29,19 @@ class ExpenseCreate(BaseModel):
     amount: float
     description: str
     split_type: str  # "equal" or "percentage"
-    splits: list[dict]  # For "percentage", provide user_id and percentage
+    splits: list[dict] | None = None  # For "percentage", provide user_id and percentage
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):  # Load the ML model
+    async with engine.begin() as conn:
+        await conn.run_sync(DatabaseSchemaBase.metadata.create_all)
+    yield
+    # Clean up the ML models and release the resources
 
 
 # FastAPI App
-app = FastAPI()
-
-
-@app.on_event("startup")
-async def startup():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+app = FastAPI(lifespan=lifespan)
 
 
 @app.post("/users/")
@@ -116,7 +83,9 @@ async def add_expense(expense: ExpenseCreate):
 
         if expense.split_type == "equal":
             group_members = await session.execute(
-                f"SELECT user_id FROM group_members WHERE group_id = {expense.group_id}"
+                text(
+                    f"SELECT user_id FROM group_members WHERE group_id = {expense.group_id}"
+                )
             )
             members = group_members.fetchall()
             split_amount = expense.amount / len(members)
@@ -125,6 +94,7 @@ async def add_expense(expense: ExpenseCreate):
                     expense_id=new_expense.id,
                     user_id=member.user_id,
                     amount=split_amount,
+                    group_id=expense.group_id,
                 )
                 for member in members
             ]
@@ -134,6 +104,7 @@ async def add_expense(expense: ExpenseCreate):
                     expense_id=new_expense.id,
                     user_id=split["user_id"],
                     amount=expense.amount * split["percentage"] / 100,
+                    group_id=expense.group_id,
                 )
                 for split in expense.splits
             ]
@@ -149,9 +120,15 @@ async def add_expense(expense: ExpenseCreate):
 async def get_balances(group_id: int):
     async with SessionLocal() as session:
         group_expenses = await session.execute(
-            f"SELECT user_id, SUM(amount) as balance FROM expense_splits WHERE expense_id IN (SELECT id FROM expenses WHERE group_id = {group_id}) GROUP BY user_id"
+            text(
+                "SELECT gm.user_id, COALESCE(SUM(amount), 0) as balance FROM group_members gm "
+                "LEFT JOIN expense_splits es ON gm.user_id = es.user_id "
+                "WHERE gm.group_id =:group_id GROUP BY gm.user_id"
+            ),
+            {"group_id": group_id},
         )
         balances = group_expenses.fetchall()
+        print(balances, group_id)
         return [
             {"user_id": balance.user_id, "balance": balance.balance}
             for balance in balances
