@@ -1,5 +1,6 @@
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import Column, Integer, String, ForeignKey, Float
+from sqlalchemy.schema import UniqueConstraint
 
 DatabaseSchemaBase = declarative_base()
 
@@ -22,6 +23,8 @@ class GroupMember(DatabaseSchemaBase):
     group_id = Column(Integer, ForeignKey("groups.id"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     role = Column(Integer, nullable=False, default=1)
+
+    __table_args__ = (UniqueConstraint("group_id", "user_id", name="_group_user_uc"),)
 
 
 class Expense(DatabaseSchemaBase):
