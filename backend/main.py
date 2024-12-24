@@ -43,6 +43,11 @@ async def lifespan(app: FastAPI):  # Load the ML model
 app = FastAPI(lifespan=lifespan)
 
 
+@app.get("/")
+async def root():
+    return {"message": "Visit /docs for API documentation"}
+
+
 @app.post("/users/")
 async def create_user(user: UserCreate):
     async with SessionLocal() as session:
