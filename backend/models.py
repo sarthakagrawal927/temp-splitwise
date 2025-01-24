@@ -15,6 +15,7 @@ class Group(DatabaseSchemaBase):
     __tablename__ = "groups"
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String, nullable=False)
+    creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
 
 
 class GroupMember(DatabaseSchemaBase):
