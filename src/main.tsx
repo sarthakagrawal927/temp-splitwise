@@ -5,6 +5,7 @@ import { Toaster } from "@/components/ui/sonner";
 import Home from "@/pages/Home";
 import Room from "@/pages/Room";
 import { saasmaker } from "@/lib/saasmaker";
+import { SaaSMakerFeedback } from "@/components/saasmaker-feedback";
 import "./index.css";
 
 function PageViewTracker() {
@@ -24,6 +25,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
         <Route path="/r/:slug" element={<Room />} />
       </Routes>
       <Toaster />
+      <SaaSMakerFeedback />
     </BrowserRouter>
   </React.StrictMode>
 );
